@@ -64,6 +64,12 @@ private:
     void setEntriesMouseData(const SDL_MouseButtonEvent& button);
 
 public:
+    /// Height of a select box showing the given number of lines
+    static unsigned getHeightForLines(unsigned numLines, FontSize fontsize)
+    {
+        return numLines * getLineHeight(fontsize) + textPadding;
+    }
+
     CSelectBox(Position pos, Extent size, FontSize fontsize = FontSize::Large, FontColor text_color = FontColor::Yellow,
                int bg_color = -1);
     Position getPos() const { return pos_; }

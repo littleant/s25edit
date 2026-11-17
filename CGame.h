@@ -9,7 +9,9 @@
 #include "Texture.h"
 #include <boost/filesystem/path.hpp>
 #include <Point.h>
+#include <cmath>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class CWindow;
@@ -21,8 +23,14 @@ class CGame
     friend class CDebug;
 
 public:
+    /// Size of the view in which everything is drawn: size in pixels divided by the GUI scale
     Extent GameResolution;
+    /// Size of the window in window mode in window coordinates (pixels, or points on macOS and Wayland) for the current
+    /// display, kept while in fullscreen
+    Extent WindowResolution;
     bool fullscreen;
+    /// GUI scale in percent, 0 = auto (use display scaling)
+    unsigned guiScalePercent = 0;
 
     bool Running;
     bool showLoadScreen;
@@ -41,7 +49,10 @@ private:
     CFont lastFps;
 
     Uint32 lastFrameTime = 0;
-    Extent appliedResolution_ = Extent{0, 0}; ///< Last resolution we applied to the window/display
+    Extent appliedResolution_ = Extent{0, 0}; ///< Current window size (also in fullscreen) in window coordinates
+    float guiScale_ = 1.f;                    ///< Currently used GUI scale factor (pixels per view unit)
+    float dpiScale_ = 1.f;                    ///< Pixels per window coordinate (> 1 on high DPI macOS/Wayland)
+    float displayScale_ = 1.f;                ///< Display scaling of the window's display (Windows only, else 1)
     bool appliedFullscreen_ = false;          ///< Last fullscreen state we applied
 
     // Textures for splash screen and cursor
@@ -74,6 +85,14 @@ private:
 
     void SetAppIcon();
     void setGLViewport();
+    void scaleMouseEvent(SDL_Event& event) const;
+    /// Display scaling of the given display on Windows (window coordinates are pixels there), 1 elsewhere
+    static float getDisplayScale(int displayIndex);
+    /// Current window size reported by SDL in window coordinates
+    Extent getWindowSize() const;
+    /// Limit the window size to the usable area of the display minus the window frame (none without a window).
+    /// Returns that area for the client area or nothing on failure.
+    std::optional<SDL_Rect> limitToUsableArea(Extent& size, int displayIndex) const;
     bool CreateWindowAndGLContext();
 
 public:
@@ -110,4 +129,31 @@ public:
     void delMapObj();
     void enterEditor(const boost::filesystem::path& filepath);
     auto getRes() const { return GameResolution; }
+
+    /// Range of selectable GUI scales in percent for the given window size
+    struct GuiScaleRange
+    {
+        unsigned minPercent, maxPercent, recommendedPercent;
+    };
+    GuiScaleRange getGuiScaleRange(const Extent& windowSize) const;
+    /// Size of the window in fullscreen on its current display in window coordinates
+    Extent getFullscreenSize() const;
+    /// Pixels per window coordinate (> 1 on high DPI macOS/Wayland). Rounded to 1/120 (unit of Wayland's fractional
+    /// scales) as the measured ratio is inexact for small windows.
+    float getDpiScale() const { return std::round(dpiScale_ * 120.f) / 120.f; }
+    /// Convert a position in window coordinates to view coordinates (like GuiScale::screenToView in s25client)
+    Position screenToView(const Position& pos) const
+    {
+        const float scale = guiScale_ / dpiScale_;
+        return Position(static_cast<int>(pos.x / scale), static_cast<int>(pos.y / scale));
+    }
+    /// Convert a position in view coordinates to window coordinates (like GuiScale::viewToScreen in s25client)
+    Position viewToScreen(const Position& pos) const
+    {
+        // Round up so that converting back with screenToView yields the same position
+        const float scale = guiScale_ / dpiScale_;
+        return Position(static_cast<int>(std::ceil(pos.x * scale)), static_cast<int>(std::ceil(pos.y * scale)));
+    }
+    /// Set the GL scissor rect from view coordinates
+    void setScissor(const Rect& rect) const;
 };

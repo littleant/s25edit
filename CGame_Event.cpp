@@ -11,9 +11,43 @@
 #include "CollisionDetection.h"
 #include "callbacks.h"
 #include "globals.h"
+#include "helpers/mathFuncs.h"
+
+void CGame::scaleMouseEvent(SDL_Event& event) const
+{
+    if(guiScale_ == dpiScale_)
+        return;
+    switch(event.type)
+    {
+        case SDL_MOUSEMOTION:
+        {
+            const Position pos = screenToView(Position(event.motion.x, event.motion.y));
+            // Calculate the relative movement from the scaled positions so small movements don't get lost
+            const Position lastPos =
+              screenToView(Position(event.motion.x - event.motion.xrel, event.motion.y - event.motion.yrel));
+            event.motion.xrel = pos.x - lastPos.x;
+            event.motion.yrel = pos.y - lastPos.y;
+            event.motion.x = pos.x;
+            event.motion.y = pos.y;
+            break;
+        }
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP:
+        {
+            const Position pos = screenToView(Position(event.button.x, event.button.y));
+            event.button.x = pos.x;
+            event.button.y = pos.y;
+            break;
+        }
+        default: break;
+    }
+}
 
 void CGame::EventHandling(SDL_Event* Event)
 {
+    // Translate mouse positions from window coordinates to the (scaled) view
+    scaleMouseEvent(*Event);
+
     switch(Event->type)
     {
         case SDL_KEYDOWN:
@@ -144,17 +178,9 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEMOTION:
         {
-            // setup mouse cursor data
-            if(MapObj && MapObj->isActive())
-            {
-                if((Event->motion.state & SDL_BUTTON(SDL_BUTTON_RIGHT)) == 0)
-                {
-                    Cursor.pos = Position(Event->motion.x, Event->motion.y);
-                }
-            } else
-            {
+            // setup mouse cursor data (it stays at the start position while scrolling the map)
+            if(!MapObj || !MapObj->isActive() || !MapObj->isScrolling())
                 Cursor.pos = Position(Event->motion.x, Event->motion.y);
-            }
             /*
                         //NOTE: we will now deliver the data to menus, windows, map etc., sometimes we have to break the
                switch and stop
@@ -175,6 +201,13 @@ void CGame::EventHandling(SDL_Event* Event)
                         if (delivered)
                             break;
             */
+
+            // Keep scrolling the map when the cursor moves over a window (it isn't warped back on Wayland)
+            if(MapObj && MapObj->isActive() && MapObj->isScrolling())
+            {
+                MapObj->setMouseData(Event->motion);
+                break;
+            }
 
             // NOTE: we will now deliver the data to menus, windows, map etc., sometimes we have to break the switch and
             // stop
@@ -382,6 +415,7 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEWHEEL:
         {
+            // Scroll lists in the topmost window below the cursor, or in the menus if there is none
             CWindow* wndAtCursor = nullptr;
             for(auto& Window : Windows)
             {
@@ -405,19 +439,57 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_WINDOWEVENT:
         {
+            // The buttons may be released in another window (e.g. after Alt+Tab), so stop scrolling the map
+            if(Event->window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+            {
+                Cursor.clicked = false;
+                if(MapObj)
+                    MapObj->stopScrolling();
+            }
             if(Event->window.event == SDL_WINDOWEVENT_RESIZED)
             {
-                // In fullscreen the compositor (e.g. Wayland) may report a size
-                // different from the one we requested. We already applied the
-                // resolution ourselves, so don't let the event override it.
-                if(fullscreen)
-                    break;
+                // Also in fullscreen as X11 and Wayland apply desktop fullscreen later
                 const Extent newSize(Event->window.data1, Event->window.data2);
-                // Ignore events matching the resolution we already applied.
-                if(newSize == appliedResolution_)
+                // Ignore events matching the resolution we already applied, unless the pixel size changed
+                // (macOS reports a changed display scale as a resize event with the same size).
+                int pixelWidth = 0, pixelHeight = 0;
+                SDL_GL_GetDrawableSize(window_.get(), &pixelWidth, &pixelHeight);
+                if(newSize == appliedResolution_ && pixelWidth == static_cast<int>(std::lround(newSize.x * dpiScale_)))
                     break;
                 UpdateDisplaySize(newSize);
             }
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            if(Event->window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED)
+            {
+                // Windows keeps the size in pixels when moving to a display with another scaling. Scale the window
+                // like other DPI aware applications and keep its center, which determines the display.
+                const float newDisplayScale = getDisplayScale(SDL_GetWindowDisplayIndex(window_.get()));
+                Extent newSize = fullscreen ? getWindowSize() : WindowResolution;
+                if(newDisplayScale != displayScale_
+                   && !(SDL_GetWindowFlags(window_.get()) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED)))
+                {
+                    const float factor = newDisplayScale / displayScale_;
+                    newSize = Extent(helpers::iround<unsigned>(WindowResolution.x * factor),
+                                     helpers::iround<unsigned>(WindowResolution.y * factor));
+                    // Keep the window including its frame (title bar) inside the usable area of the new display
+                    const auto area = limitToUsableArea(newSize, SDL_GetWindowDisplayIndex(window_.get()));
+                    int x = 0, y = 0;
+                    SDL_GetWindowPosition(window_.get(), &x, &y);
+                    x += (static_cast<int>(WindowResolution.x) - static_cast<int>(newSize.x)) / 2;
+                    y += (static_cast<int>(WindowResolution.y) - static_cast<int>(newSize.y)) / 2;
+                    if(area)
+                    {
+                        // If it still does not fit keep the top left (title bar) visible
+                        x = std::max(area->x, std::min(x, area->x + area->w - static_cast<int>(newSize.x)));
+                        y = std::max(area->y, std::min(y, area->y + area->h - static_cast<int>(newSize.y)));
+                    }
+                    SDL_SetWindowSize(window_.get(), newSize.x, newSize.y);
+                    SDL_SetWindowPosition(window_.get(), x, y);
+                }
+                // Also updates the Auto GUI scale and in fullscreen the window mode size
+                UpdateDisplaySize(newSize);
+            }
+#endif
             break;
         }
 

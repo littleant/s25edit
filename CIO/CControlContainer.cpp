@@ -7,6 +7,7 @@
 #include "../Texture.h"
 #include "../globals.h"
 #include "CButton.h"
+#include "CDropDown.h"
 #include "CFont.h"
 #include "CPicture.h"
 #include "CSelectBox.h"
@@ -39,10 +40,18 @@ void CControlContainer::setMouseData(const SDL_MouseMotionEvent motion)
     {
         selectbox->setMouseData(motion);
     }
+    for(const auto& dropDown : dropDowns)
+        dropDown->setMouseData(motion);
 }
 
 void CControlContainer::setMouseData(const SDL_MouseButtonEvent button)
 {
+    // Open drop-down lists are on top of the other controls
+    for(const auto& dropDown : dropDowns)
+    {
+        if(dropDown->setMouseData(button))
+            return;
+    }
     for(const auto& picture : pictures)
     {
         picture->setMouseData(button);
@@ -63,6 +72,11 @@ void CControlContainer::setMouseData(const SDL_MouseButtonEvent button)
 
 void CControlContainer::setMouseWheel(const SDL_MouseWheelEvent& wheel, Position mousePos)
 {
+    for(const auto& dropDown : dropDowns)
+    {
+        if(dropDown->setMouseWheel(wheel, mousePos))
+            return;
+    }
     for(const auto& selectbox : selectboxes)
         selectbox->setMouseWheel(wheel, mousePos);
 }
@@ -181,6 +195,14 @@ bool CControlContainer::delSelectBox(CSelectBox* SelectBoxToDelete)
     return eraseElement(selectboxes, SelectBoxToDelete);
 }
 
+CDropDown* CControlContainer::addDropDown(Position pos, Extent size, std::function<void(unsigned)> callback)
+{
+    pos += Position(border.left, border.top);
+
+    dropDowns.emplace_back(std::make_unique<CDropDown>(pos, size, std::move(callback)));
+    return dropDowns.back().get();
+}
+
 void CControlContainer::drawChildren(Position origin)
 {
     for(const auto& picture : pictures)
@@ -197,4 +219,7 @@ void CControlContainer::drawChildren(Position origin)
     {
         getBmpTexture(static_picture.pic).draw(origin + static_picture.pos);
     }
+    // Last so open lists are on top
+    for(const auto& dropDown : dropDowns)
+        dropDown->draw(origin);
 }

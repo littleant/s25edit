@@ -284,10 +284,8 @@ void CSelectBox::draw(Position parentOrigin)
     }
 
     // Clip entries to the select box area
-    const auto viewH = global::s2->getRes().y;
     glEnable(GL_SCISSOR_TEST);
-    glScissor(area.left, viewH - (area.top + static_cast<int>(size_.y)), static_cast<int>(size_.x),
-              static_cast<int>(size_.y));
+    global::s2->setScissor(Rect(area.getOrigin(), size_));
 
     // Draw entries
     for(int i = 0; i < static_cast<int>(Entries.size()); i++)

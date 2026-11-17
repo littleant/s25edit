@@ -10,8 +10,11 @@
 #include "CMap.h"
 #include "callbacks.h"
 #include "globals.h"
+#include "helpers/mathFuncs.h"
 #include "lua/GameDataLoader.h"
 #include <glad/glad.h>
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 
 bool CGame::CreateWindowAndGLContext()
@@ -19,9 +22,16 @@ bool CGame::CreateWindowAndGLContext()
     if(window_)
         return false;
 
-    window_.reset(SDL_CreateWindow("Return to the Roots Map editor [BETA]", SDL_WINDOWPOS_CENTERED,
-                                   SDL_WINDOWPOS_CENTERED, GameResolution.x, GameResolution.y,
-                                   SDL_WINDOW_HIDDEN | SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE));
+    // The window size is stored in pixels at 100% scaling. Convert it with the scaling of the primary display the
+    // window opens on (also for fullscreen, which is entered afterwards).
+    displayScale_ = getDisplayScale(0);
+    WindowResolution = Extent(helpers::iround<unsigned>(WindowResolution.x * displayScale_),
+                              helpers::iround<unsigned>(WindowResolution.y * displayScale_));
+    limitToUsableArea(WindowResolution, 0);
+
+    window_.reset(SDL_CreateWindow(
+      "Return to the Roots Map editor [BETA]", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WindowResolution.x,
+      WindowResolution.y, SDL_WINDOW_HIDDEN | SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI));
     if(!window_)
         return false;
 
@@ -51,54 +61,46 @@ void CGame::ApplyWindowChanges()
 
     if(fullscreen)
     {
-        SDL_DisplayMode dm;
-        SDL_zero(dm);
-        dm.w = static_cast<int>(GameResolution.x);
-        dm.h = static_cast<int>(GameResolution.y);
-        dm.format = 0; // let SDL pick a supported format
-        dm.refresh_rate = 0;
-        if(SDL_SetWindowDisplayMode(window_.get(), &dm) != 0)
+        // Desktop fullscreen on the current display: Native resolution without changing the display mode
+        if(SDL_SetWindowFullscreen(window_.get(), SDL_WINDOW_FULLSCREEN_DESKTOP) != 0)
         {
-            std::cerr << "SDL_SetWindowDisplayMode failed: " << SDL_GetError() << std::endl;
+            std::cerr << "SDL_SetWindowFullscreen failed: " << SDL_GetError() << std::endl;
             return;
         }
-
-        const Uint32 flags = SDL_GetWindowFlags(window_.get());
-        if(!(flags & SDL_WINDOW_FULLSCREEN))
-        {
-            if(SDL_SetWindowFullscreen(window_.get(), SDL_WINDOW_FULLSCREEN) != 0)
-            {
-                std::cerr << "SDL_SetWindowFullscreen failed: " << SDL_GetError() << std::endl;
-                return;
-            }
-        } else if(GameResolution != appliedResolution_)
-        {
-            // Already fullscreen and the resolution changed. Toggle fullscreen off and
-            // back on so SDL/Wayland actually applies the new display mode.
-            if(SDL_SetWindowFullscreen(window_.get(), 0) != 0)
-            {
-                std::cerr << "SDL_SetWindowFullscreen(0) failed: " << SDL_GetError() << std::endl;
-                return;
-            }
-            SDL_SetWindowSize(window_.get(), GameResolution.x, GameResolution.y);
-            if(SDL_SetWindowFullscreen(window_.get(), SDL_WINDOW_FULLSCREEN) != 0)
-            {
-                std::cerr << "SDL_SetWindowFullscreen failed: " << SDL_GetError() << std::endl;
-                return;
-            }
-        }
-    } else
+    } else if(appliedFullscreen_ || WindowResolution != appliedResolution_ || WindowResolution != getWindowSize())
     {
+        // Only touch the window if the mode or size changed, not e.g. for the GUI scale: Windows resizes and moves a
+        // maximized window but keeps it maximized, showing its normally off-screen frame beside the content.
+        // Remember the current display before leaving fullscreen so we re-center there instead of on the primary one
+        int displayIndex = SDL_GetWindowDisplayIndex(window_.get());
+        if(displayIndex < 0)
+            displayIndex = 0;
         if(SDL_SetWindowFullscreen(window_.get(), 0) != 0)
         {
             std::cerr << "SDL_SetWindowFullscreen failed: " << SDL_GetError() << std::endl;
             return;
         }
-        SDL_SetWindowSize(window_.get(), GameResolution.x, GameResolution.y);
-        SDL_SetWindowPosition(window_.get(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        // Keep a maximized window of this size (Windows maximizes it again when leaving fullscreen)
+        const bool maximized = (SDL_GetWindowFlags(window_.get()) & SDL_WINDOW_MAXIMIZED) != 0;
+        if(!maximized || WindowResolution != getWindowSize())
+        {
+            // A maximized window keeps its size: Wayland even reports the new size, but keeps the old pixel size
+            if(maximized)
+                SDL_RestoreWindow(window_.get());
+            // Limit to the usable area minus the frame (known once the window exists), center there (title bar visible)
+            const auto area = limitToUsableArea(WindowResolution, displayIndex);
+            SDL_SetWindowSize(window_.get(), WindowResolution.x, WindowResolution.y);
+            if(area)
+                SDL_SetWindowPosition(window_.get(), area->x + (area->w - static_cast<int>(WindowResolution.x)) / 2,
+                                      area->y + (area->h - static_cast<int>(WindowResolution.y)) / 2);
+            else
+                SDL_SetWindowPosition(window_.get(), SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex),
+                                      SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex));
+        }
     }
 
-    UpdateDisplaySize(GameResolution);
+    // X11 and Wayland may apply fullscreen later and send a resize event
+    UpdateDisplaySize(fullscreen ? getWindowSize() : WindowResolution);
 }
 
 void CGame::setGLViewport() // NOLINT(readability-make-member-function-const)
@@ -117,11 +119,97 @@ void CGame::setGLViewport() // NOLINT(readability-make-member-function-const)
     glLoadIdentity();
 }
 
+float CGame::getDisplayScale([[maybe_unused]] int displayIndex)
+{
+#ifdef _WIN32
+    float dpi = 0;
+    if(SDL_GetDisplayDPI(displayIndex, nullptr, &dpi, nullptr) == 0 && dpi > 0)
+        return dpi / 96.f;
+#endif
+    return 1.f;
+}
+
+Extent CGame::getWindowSize() const
+{
+    int w = 0, h = 0;
+    SDL_GetWindowSize(window_.get(), &w, &h);
+    return Extent(w, h);
+}
+
+std::optional<SDL_Rect> CGame::limitToUsableArea(Extent& size, int displayIndex) const
+{
+    SDL_Rect area;
+    if(SDL_GetDisplayUsableBounds(displayIndex, &area) != 0)
+        return std::nullopt;
+    int top = 0, left = 0, bottom = 0, right = 0; // Stay 0 without a window or on failure
+    if(window_)
+        SDL_GetWindowBordersSize(window_.get(), &top, &left, &bottom, &right);
+    area = {area.x + left, area.y + top, area.w - left - right, area.h - top - bottom};
+    size.x = std::min(size.x, static_cast<unsigned>(std::max(1, area.w)));
+    size.y = std::min(size.y, static_cast<unsigned>(std::max(1, area.h)));
+    return area;
+}
+
+CGame::GuiScaleRange CGame::getGuiScaleRange(const Extent& windowSize) const
+{
+    // Same as in s25client, but use the display scaling as the recommended scale: The pixel density on macOS and
+    // Wayland, the display scaling of Windows (window coordinates are pixels there) and 100% elsewhere.
+    // Don't combine both as SDL_GetDisplayDPI already includes the pixel density with sdl2-compat.
+    const float dpiScale = dpiScale_ > 1.f ? dpiScale_ : displayScale_;
+    constexpr auto min = 100u;
+    const auto recommended = std::max(min, helpers::iround<unsigned>(dpiScale * 100.f));
+    // Keep at least 800x600 visible
+    const auto maxScale = std::min(windowSize.x * dpiScale_ / 800.f, windowSize.y * dpiScale_ / 600.f);
+    const auto max = std::max(helpers::iround<unsigned>(maxScale * 100.f), min);
+    return GuiScaleRange{min, max, std::min(recommended, max)};
+}
+
+Extent CGame::getFullscreenSize() const
+{
+    // The current size when in fullscreen, else the bounds of the window's display
+    SDL_Rect bounds;
+    if(fullscreen || SDL_GetDisplayBounds(SDL_GetWindowDisplayIndex(window_.get()), &bounds) != 0)
+        return appliedResolution_;
+    return Extent(bounds.w, bounds.h);
+}
+
+void CGame::setScissor(const Rect& rect) const
+{
+    const auto left = static_cast<int>(std::floor(rect.left * guiScale_));
+    const auto top = static_cast<int>(std::floor(rect.top * guiScale_));
+    const auto right = static_cast<int>(std::ceil(rect.right * guiScale_));
+    const auto bottom = static_cast<int>(std::ceil(rect.bottom * guiScale_));
+    glScissor(left, helpers::iround<int>(appliedResolution_.y * dpiScale_) - bottom, right - left, bottom - top);
+}
+
 void CGame::UpdateDisplaySize(const Extent& newSize)
 {
-    GameResolution = newSize;
-    appliedResolution_ = GameResolution;
+    appliedResolution_ = newSize;
     appliedFullscreen_ = fullscreen;
+    // In fullscreen keep the window mode size, but scale it with the display scaling like a window
+    const float displayScale = getDisplayScale(SDL_GetWindowDisplayIndex(window_.get()));
+    if(!fullscreen)
+        WindowResolution = newSize;
+    else if(displayScale != displayScale_)
+        WindowResolution = Extent(WindowResolution * (displayScale / displayScale_));
+    displayScale_ = displayScale;
+
+    // The GL drawable is larger than the window on high DPI displays on macOS and Wayland
+    int windowWidth = 0, windowHeight = 0, pixelWidth = 0, pixelHeight = 0;
+    if(window_)
+    {
+        SDL_GetWindowSize(window_.get(), &windowWidth, &windowHeight);
+        SDL_GL_GetDrawableSize(window_.get(), &pixelWidth, &pixelHeight);
+    }
+    if(windowWidth > 0 && pixelWidth > 0)
+        dpiScale_ = static_cast<float>(pixelWidth) / windowWidth;
+
+    const auto range = getGuiScaleRange(appliedResolution_);
+    const auto percent = guiScalePercent == 0 ? range.recommendedPercent :
+                                                helpers::clamp(guiScalePercent, range.minPercent, range.maxPercent);
+    guiScale_ = percent / 100.f;
+    GameResolution = Extent(helpers::iround<unsigned>(appliedResolution_.x * dpiScale_ / guiScale_),
+                            helpers::iround<unsigned>(appliedResolution_.y * dpiScale_ / guiScale_));
 
     setGLViewport();
 }

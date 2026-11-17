@@ -56,6 +56,8 @@ void CFont::setMouseData(SDL_MouseButtonEvent button, const Rect& clickArea)
                 initialColor_ = tmpInitialColor;
             } else if(button.state == SDL_RELEASED && getColor() == FontColor::Orange)
             {
+                // Reset before the callback which might delete this
+                setColor(initialColor_);
                 callback(clickedParam);
             }
         } else if(getColor() != initialColor_)

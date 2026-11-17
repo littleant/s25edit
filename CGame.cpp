@@ -10,6 +10,7 @@
 #include "RttrConfig.h"
 #include "files.h"
 #include "globals.h"
+#include "helpers/mathFuncs.h"
 #include "s25util/file_handle.h"
 #include <libsiedler2/ArchivItem_Ini.h>
 #include <libsiedler2/ErrorCodes.h>
@@ -35,8 +36,8 @@ namespace bfs = boost::filesystem;
 boost::program_options::variables_map parse_cmdline_args(int argc, char* argv[]);
 
 CGame::CGame(Extent GameResolution_, bool fullscreen_)
-    : GameResolution(GameResolution_), fullscreen(fullscreen_), Running(true), showLoadScreen(true),
-      lastFps("", Position{0, 0}, FontSize::Medium)
+    : GameResolution(GameResolution_), WindowResolution(GameResolution_), fullscreen(fullscreen_), Running(true),
+      showLoadScreen(true), lastFps("", Position{0, 0}, FontSize::Medium)
 {
     global::bmpArray.resize(MAXBOBBMP);
     global::shadowArray.resize(MAXBOBSHADOW);
@@ -181,9 +182,10 @@ void CGame::LoadSettings()
     const auto* ini = dynamic_cast<const libsiedler2::ArchivItem_Ini*>(settings.find("editor"));
     if(!ini)
         return;
-    GameResolution.x = ini->getValue("width", static_cast<int>(GameResolution.x));
-    GameResolution.y = ini->getValue("height", static_cast<int>(GameResolution.y));
+    WindowResolution.x = ini->getValue("width", static_cast<int>(WindowResolution.x));
+    WindowResolution.y = ini->getValue("height", static_cast<int>(WindowResolution.y));
     fullscreen = ini->getValue("fullscreen", fullscreen);
+    guiScalePercent = ini->getValue("gui_scale", static_cast<int>(guiScalePercent));
 }
 
 void CGame::SaveSettings() const
@@ -191,9 +193,11 @@ void CGame::SaveSettings() const
     libsiedler2::Archiv settings;
     settings.push(std::make_unique<libsiedler2::ArchivItem_Ini>("editor"));
     auto& ini = dynamic_cast<libsiedler2::ArchivItem_Ini&>(*settings.find("editor"));
-    ini.setValue("width", GameResolution.x);
-    ini.setValue("height", GameResolution.y);
+    // Store the window mode size (also in fullscreen) in pixels at 100% scaling like other DPI aware applications
+    ini.setValue("width", helpers::iround<int>(WindowResolution.x / displayScale_));
+    ini.setValue("height", helpers::iround<int>(WindowResolution.y / displayScale_));
     ini.setValue("fullscreen", static_cast<int>(fullscreen));
+    ini.setValue("gui_scale", guiScalePercent);
     const bfs::path settingsPath = RTTRCONFIG.expandPath("<RTTR_USERDATA>/s25edit.ini");
     // The user data directory does not exist if the game was never started
     boost::system::error_code ec;
@@ -350,6 +354,17 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "Initializing SDL...";
+#ifdef SDL_HINT_WINDOWS_DPI_AWARENESS
+    // Use pixels for the window size instead of letting Windows upscale the window according to the display scaling.
+    // Scaling is done by the GUI scale instead.
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
+#if defined(SDL_HINT_VIDEODRIVER) \
+  && (defined(__LINUX__) || defined(__FREEBSD__) || defined(__OPENBSD__) || defined(__NETBSD__))
+    // Prefer Wayland over X11 like SDL3 does, as only there the display scaling can be detected.
+    // Default priority, so the environment variable SDL_VIDEODRIVER still takes precedence.
+    SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "wayland,x11", SDL_HINT_DEFAULT);
+#endif
     if(SDL_Init(SDL_INIT_EVERYTHING) < 0)
     {
         std::cout << "failure";

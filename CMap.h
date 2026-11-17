@@ -118,6 +118,8 @@ public:
     static void unloadMapPics();
 
     void moveMap(Position offset);
+    bool isScrolling() const { return startScrollPos.has_value(); }
+    void stopScrolling() { startScrollPos = std::nullopt; }
     void setMouseData(const SDL_MouseMotionEvent& motion);
     void setMouseData(const SDL_MouseButtonEvent& button);
     void setKeyboardData(const SDL_KeyboardEvent& key);

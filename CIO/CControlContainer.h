@@ -6,10 +6,12 @@
 #pragma once
 
 #include "defines.h"
+#include <functional>
 #include <memory>
 #include <vector>
 
 class CButton;
+class CDropDown;
 class CFont;
 class CPicture;
 class CTextfield;
@@ -45,6 +47,7 @@ private:
     std::vector<std::unique_ptr<CPicture>> pictures;
     std::vector<std::unique_ptr<CTextfield>> textfields;
     std::vector<std::unique_ptr<CSelectBox>> selectboxes;
+    std::vector<std::unique_ptr<CDropDown>> dropDowns;
     std::vector<Picture> static_pictures;
 
     template<class T, class U>
@@ -95,4 +98,5 @@ public:
     CSelectBox* addSelectBox(Position pos, Extent size, FontSize fontsize = FontSize::Large,
                              FontColor text_color = FontColor::Yellow, int bg_color = -1);
     bool delSelectBox(CSelectBox* SelectBoxToDelete);
+    CDropDown* addDropDown(Position pos, Extent size, std::function<void(unsigned)> callback);
 };
