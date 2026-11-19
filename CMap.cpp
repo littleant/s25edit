@@ -76,6 +76,7 @@ CMap::CMap(const boost::filesystem::path& filepath)
 
 CMap::~CMap()
 {
+    stopScrolling();
     destructMap();
 }
 
@@ -475,19 +476,102 @@ void CMap::unloadMapPics()
     CFile::set_palArray(&global::palArray[PAL_IO + 1]);
 }
 
+namespace {
+/// Wrap a coordinate into [0, size) like the map wraps around at its borders
+int wrapCoord(int value, int size)
+{
+    if(size <= 0) // Empty map
+        return value;
+    value %= size;
+    return value < 0 ? value + size : value;
+}
+
+/// Whether this is an X11 client on a Wayland desktop. The video driver doesn't change after the initialization.
+bool isXwayland()
+{
+    static const bool result = [] {
+        const char* driver = SDL_GetCurrentVideoDriver();
+        const char* waylandDisplay = SDL_getenv("WAYLAND_DISPLAY");
+        return driver && SDL_strcmp(driver, "x11") == 0 && waylandDisplay && *waylandDisplay;
+    }();
+    return result;
+}
+
+/// Whether the pointer can be warped back to the start position while scrolling. Wayland doesn't allow it: SDL (and
+/// Xwayland for X11 clients) emulate it by locking the pointer, which doesn't end while the cursor is hidden.
+bool canWarpMouse()
+{
+    static const bool result = [] {
+        const char* driver = SDL_GetCurrentVideoDriver();
+        return !(driver && SDL_strcmp(driver, "wayland") == 0) && !isXwayland();
+    }();
+    return result;
+}
+/// The cursor is shown after scrolling to unlock the pointer on Xwayland, see CMap::stopScrolling.
+/// Not a member, as the map may be destroyed before the pointer moved.
+bool showCursorUntilMoved = false;
+} // namespace
+
 void CMap::moveMap(Position offset)
 {
-    displayRect.setOrigin(displayRect.getOrigin() + offset);
-    // reset coords of displayRects when end of map is reached
-    if(displayRect.left >= map->width_pixel)
-        displayRect.move(Position(-map->width_pixel, 0));
-    else if(displayRect.left <= -static_cast<int>(displayRect.getSize().x))
-        displayRect.setOrigin(Position(map->width_pixel - displayRect.getSize().x, displayRect.top));
+    // Keep the origin inside the map, also for large offsets and views larger than the map
+    const Position origin = displayRect.getOrigin() + offset;
+    displayRect.setOrigin(Position(wrapCoord(origin.x, map->width_pixel), wrapCoord(origin.y, map->height_pixel)));
+}
 
-    if(displayRect.top >= map->height_pixel)
-        displayRect.move(Position(0, -map->height_pixel));
-    else if(displayRect.top <= -static_cast<int>(displayRect.getSize().y))
-        displayRect.setOrigin(Position(displayRect.left, map->height_pixel - displayRect.getSize().y));
+void CMap::startScrolling(Position pos)
+{
+    startScrollPos = pos;
+    dragScrolling_ = global::s2->dragScrolling;
+    // Without warping, lock the pointer at its position and scroll by its relative movement
+    if(!dragScrolling_ && !canWarpMouse())
+    {
+        if(SDL_SetRelativeMouseMode(SDL_TRUE) == 0)
+            pointerLocked_ = true;
+        else // E.g. the compositor doesn't support locking the pointer: The cursor can't stay in place
+            dragScrolling_ = true;
+    }
+}
+
+void CMap::stopScrolling()
+{
+    if(pointerLocked_)
+    {
+        pointerLocked_ = false;
+        // Leaving the relative mode warps the pointer to SDL's mouse position, which the relative motion moved on
+        // Xwayland. Warping in the relative mode only sets this position, so the pointer returns to the start position.
+        SDL_WarpMouseInWindow(nullptr, startScrollPos->x, startScrollPos->y);
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+        // SDL warps the pointer when leaving the relative mode, which Xwayland emulates by locking it while the cursor
+        // is hidden. Absolute pointing devices (e.g. in VMs) can't move a locked pointer, so show the cursor to unlock
+        // it until the pointer moved.
+        if(isXwayland())
+        {
+            SDL_ShowCursor(SDL_ENABLE);
+            showCursorUntilMoved = true;
+        }
+    }
+    startScrollPos = std::nullopt;
+}
+
+void CMap::hideCursorAfterMotion(const SDL_MouseMotionEvent& motion)
+{
+    // See stopScrolling
+    if(showCursorUntilMoved && (motion.xrel != 0 || motion.yrel != 0))
+    {
+        SDL_ShowCursor(SDL_DISABLE);
+        showCursorUntilMoved = false;
+    }
+}
+
+void CMap::onMouseMotion(const SDL_MouseMotionEvent& motion)
+{
+    // The right button was released outside of the window or while another one had the focus
+    if(!(motion.state & SDL_BUTTON_RMASK))
+        stopScrolling();
+    // Same for the left button, otherwise we would keep modifying the vertices
+    if(!(motion.state & SDL_BUTTON_LMASK))
+        stopModifying();
 }
 
 void CMap::setMouseData(const SDL_MouseMotionEvent& motion)
@@ -496,8 +580,16 @@ void CMap::setMouseData(const SDL_MouseMotionEvent& motion)
     // Are we scrolling?
     if(startScrollPos)
     {
-        assert(motion.state & SDL_BUTTON(3));
-        Position offset = Position(motion.x, motion.y) - *startScrollPos;
+        // The map moves by the movement of the mouse while the cursor stays at the start position.
+        // When dragging, the cursor moves and the map follows it, so the part of the map under the cursor stays there.
+        const bool warpMouse = !dragScrolling_ && !pointerLocked_;
+        Position offset;
+        if(dragScrolling_)
+            offset = Position(-motion.xrel, -motion.yrel);
+        else if(pointerLocked_)
+            offset = Position(motion.xrel, motion.yrel);
+        else
+            offset = Position(motion.x, motion.y) - *startScrollPos;
         if(HorizontalMovementLocked)
             offset.x = 0;
         if(VerticalMovementLocked)
@@ -505,12 +597,15 @@ void CMap::setMouseData(const SDL_MouseMotionEvent& motion)
         moveMap(offset);
 
         // this whole "warping-thing" is to prevent cursor-moving WITHIN the window while user moves over the map
-        SDL_EventState(SDL_MOUSEMOTION, SDL_IGNORE);
-        SDL_WarpMouseInWindow(nullptr, startScrollPos->x, startScrollPos->y);
-        SDL_EventState(SDL_MOUSEMOTION, SDL_ENABLE);
+        if(warpMouse)
+        {
+            SDL_EventState(SDL_MOUSEMOTION, SDL_IGNORE);
+            SDL_WarpMouseInWindow(nullptr, startScrollPos->x, startScrollPos->y);
+            SDL_EventState(SDL_MOUSEMOTION, SDL_ENABLE);
+        }
     }
 
-    storeVerticesFromMouse(Position(motion.x, motion.y), motion.state);
+    storeVerticesFromMouse(isCursorFrozen() ? *startScrollPos : Position(motion.x, motion.y), motion.state);
 }
 
 void CMap::onLeftMouseDown(const Point32& pos)
@@ -632,14 +727,14 @@ void CMap::setMouseData(const SDL_MouseButtonEvent& button)
         if(button.button == SDL_BUTTON_LEFT)
             onLeftMouseDown({button.x, button.y});
         else if(button.button == SDL_BUTTON_RIGHT)
-            startScrollPos = Position(button.x, button.y);
+            startScrolling(Position(button.x, button.y));
     } else if(button.state == SDL_RELEASED)
     {
         // stop touching vertex data
         if(button.button == SDL_BUTTON_LEFT)
-            modify = false;
+            stopModifying();
         else if(button.button == SDL_BUTTON_RIGHT)
-            startScrollPos = std::nullopt;
+            stopScrolling();
     }
 }
 
@@ -996,25 +1091,13 @@ void CMap::storeVerticesFromMouse(Position mousePos, Uint8 /*MouseState*/)
     // get X
     // following out commented lines are the correct ones, but for tolerance (to prevent to early jumps of the cursor)
     // we subtract "triangleWidth/2"  Xeven = (MouseX + displayRect.left) / triangleWidth;
-    Xeven = (mousePos.x + displayRect.left - triangleWidth / 2) / triangleWidth;
-    if(Xeven < 0)
-        Xeven += (map->width);
-    else if(Xeven > map->width - 1)
-        Xeven -= (map->width - 1);
+    // Wrap around the map borders (the cursor may be more than a map width away, e.g. if the view is larger)
+    Xeven = wrapCoord(mousePos.x + displayRect.left - triangleWidth / 2, map->width_pixel) / triangleWidth;
     // Add rows are already shifted by triangleWidth / 2
-    Xodd = (mousePos.x + displayRect.left) / triangleWidth;
-    // Xodd = (mousePos.x + displayRect.left) / triangleWidth;
-    if(Xodd < 0)
-        Xodd += (map->width - 1);
-    else if(Xodd > map->width - 1)
-        Xodd -= (map->width);
+    Xodd = wrapCoord(mousePos.x + displayRect.left, map->width_pixel) / triangleWidth;
 
-    MousePosY = mousePos.y + displayRect.top;
     // correct mouse position Y if displayRect is outside map edges
-    if(MousePosY < 0)
-        MousePosY += map->height_pixel;
-    else if(MousePosY > map->height_pixel)
-        MousePosY = mousePos.y - (map->height_pixel - displayRect.top);
+    MousePosY = wrapCoord(mousePos.y + displayRect.top, map->height_pixel);
 
     // get Y
     for(int j = 0; j < map->height; j++)

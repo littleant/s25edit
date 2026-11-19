@@ -184,6 +184,7 @@ void CGame::LoadSettings()
     GameResolution.x = ini->getValue("width", static_cast<int>(GameResolution.x));
     GameResolution.y = ini->getValue("height", static_cast<int>(GameResolution.y));
     fullscreen = ini->getValue("fullscreen", fullscreen);
+    dragScrolling = ini->getValue("drag_scrolling", dragScrolling);
 }
 
 void CGame::SaveSettings() const
@@ -194,6 +195,7 @@ void CGame::SaveSettings() const
     ini.setValue("width", GameResolution.x);
     ini.setValue("height", GameResolution.y);
     ini.setValue("fullscreen", static_cast<int>(fullscreen));
+    ini.setValue("drag_scrolling", static_cast<int>(dragScrolling));
     const bfs::path settingsPath = RTTRCONFIG.expandPath("<RTTR_USERDATA>/s25edit.ini");
     // The user data directory does not exist if the game was never started
     boost::system::error_code ec;

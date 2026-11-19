@@ -12,6 +12,15 @@
 #include "callbacks.h"
 #include "globals.h"
 
+void CGame::useFrozenCursorPos(SDL_MouseButtonEvent& button) const
+{
+    if(MapObj && MapObj->isActive() && MapObj->isCursorFrozen())
+    {
+        button.x = Cursor.pos.x;
+        button.y = Cursor.pos.y;
+    }
+}
+
 void CGame::EventHandling(SDL_Event* Event)
 {
     switch(Event->type)
@@ -144,17 +153,13 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEMOTION:
         {
-            // setup mouse cursor data
-            if(MapObj && MapObj->isActive())
-            {
-                if((Event->motion.state & SDL_BUTTON(SDL_BUTTON_RIGHT)) == 0)
-                {
-                    Cursor.pos = Position(Event->motion.x, Event->motion.y);
-                }
-            } else
-            {
+            // Before onMouseMotion: The motion stopping the scrolling must not hide the cursor again right away
+            CMap::hideCursorAfterMotion(Event->motion);
+            if(MapObj)
+                MapObj->onMouseMotion(Event->motion);
+            // setup mouse cursor data (it stays at the start position while scrolling the map)
+            if(!MapObj || !MapObj->isActive() || !MapObj->isCursorFrozen())
                 Cursor.pos = Position(Event->motion.x, Event->motion.y);
-            }
             /*
                         //NOTE: we will now deliver the data to menus, windows, map etc., sometimes we have to break the
                switch and stop
@@ -175,6 +180,13 @@ void CGame::EventHandling(SDL_Event* Event)
                         if (delivered)
                             break;
             */
+
+            // Keep scrolling the map when the cursor moves over a window (it isn't warped back on Wayland)
+            if(MapObj && MapObj->isActive() && MapObj->isScrolling())
+            {
+                MapObj->setMouseData(Event->motion);
+                break;
+            }
 
             // NOTE: we will now deliver the data to menus, windows, map etc., sometimes we have to break the switch and
             // stop
@@ -237,6 +249,7 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEBUTTONDOWN:
         {
+            useFrozenCursorPos(Event->button);
             // setup mouse cursor data
             Cursor.clicked = true;
             Cursor.button.left = false;
@@ -312,6 +325,7 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEBUTTONUP:
         {
+            useFrozenCursorPos(Event->button);
             // setup mouse cursor data
             Cursor.clicked = false;
 
@@ -405,6 +419,16 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_WINDOWEVENT:
         {
+            // The buttons may be released in another window (e.g. after Alt+Tab), so stop scrolling/modifying the map
+            if(Event->window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+            {
+                Cursor.clicked = false;
+                if(MapObj)
+                {
+                    MapObj->stopScrolling();
+                    MapObj->stopModifying();
+                }
+            }
             if(Event->window.event == SDL_WINDOWEVENT_RESIZED)
             {
                 // In fullscreen the compositor (e.g. Wayland) may report a size

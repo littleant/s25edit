@@ -23,6 +23,10 @@ class CGame
 public:
     Extent GameResolution;
     bool fullscreen;
+    /// Scroll the map by dragging it like a picture with the right mouse button: The cursor moves with the map.
+    /// Otherwise the cursor stays in place while the map moves, which needs relative mouse movement (no absolute
+    /// pointing devices like graphics tablets or VMs with mouse integration).
+    bool dragScrolling = false;
 
     bool Running;
     bool showLoadScreen;
@@ -75,6 +79,9 @@ private:
     void SetAppIcon();
     void setGLViewport();
     bool CreateWindowAndGLContext();
+    /// While scrolling the map the cursor stays at the start position, but the position of the button events may
+    /// differ (it follows the relative motion if the pointer is locked). Use the cursor position there.
+    void useFrozenCursorPos(SDL_MouseButtonEvent& button) const;
 
 public:
     // Apply current GameResolution and fullscreen settings to the window/display.
