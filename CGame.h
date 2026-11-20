@@ -23,6 +23,8 @@ class CGame
 public:
     Extent GameResolution;
     bool fullscreen;
+    /// Scroll the map by dragging it with the cursor instead of keeping the cursor in place
+    bool dragScrolling = false;
 
     bool Running;
     bool showLoadScreen;
@@ -71,10 +73,15 @@ private:
     std::vector<void (*)(int)> Callbacks;
     // Object for the Map
     std::unique_ptr<CMap> MapObj;
+    /// Position of the last mouse motion delivered
+    Position lastMousePos_ = Position::invalid();
 
     void SetAppIcon();
     void setGLViewport();
     bool CreateWindowAndGLContext();
+    bool isMapCursorFrozen() const;
+    /// The position of button events may differ slightly from the frozen cursor
+    void useFrozenCursorPos(SDL_MouseButtonEvent& button) const;
 
 public:
     // Apply current GameResolution and fullscreen settings to the window/display.
@@ -92,6 +99,9 @@ public:
     void UpdateDisplaySize(const Extent& newSize);
 
     void EventHandling(SDL_Event* Event);
+
+    /// Move the cursor back to `pos` and return how far it was away from there
+    Position warpMouseBack(Position pos);
 
     void GameLoop();
 

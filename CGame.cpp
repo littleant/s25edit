@@ -172,6 +172,15 @@ void CGame::enterEditor(const boost::filesystem::path& filepath)
     setMapObj(std::make_unique<CMap>(filepath));
 }
 
+namespace {
+/// Values of map_scroll_mode in the section "interface", like MapScrollMode in s25client
+enum class MapScrollMode
+{
+    ScrollOpposite = 1,
+    GrabAndDrag = 2
+};
+} // namespace
+
 void CGame::LoadSettings()
 {
     const bfs::path settingsPath = RTTRCONFIG.expandPath("<RTTR_USERDATA>/s25edit.ini");
@@ -184,6 +193,15 @@ void CGame::LoadSettings()
     GameResolution.x = ini->getValue("width", static_cast<int>(GameResolution.x));
     GameResolution.y = ini->getValue("height", static_cast<int>(GameResolution.y));
     fullscreen = ini->getValue("fullscreen", fullscreen);
+    // Same section and name as in the settings of s25client
+    if(const auto* iniInterface = dynamic_cast<const libsiedler2::ArchivItem_Ini*>(settings.find("interface")))
+    {
+        const int mapScrollMode = iniInterface->getValue("map_scroll_mode", -1);
+        if(mapScrollMode == static_cast<int>(MapScrollMode::ScrollOpposite))
+            dragScrolling = false;
+        else if(mapScrollMode == static_cast<int>(MapScrollMode::GrabAndDrag))
+            dragScrolling = true;
+    }
 }
 
 void CGame::SaveSettings() const
@@ -194,6 +212,10 @@ void CGame::SaveSettings() const
     ini.setValue("width", GameResolution.x);
     ini.setValue("height", GameResolution.y);
     ini.setValue("fullscreen", static_cast<int>(fullscreen));
+    settings.push(std::make_unique<libsiedler2::ArchivItem_Ini>("interface"));
+    auto& iniInterface = dynamic_cast<libsiedler2::ArchivItem_Ini&>(*settings.find("interface"));
+    iniInterface.setValue("map_scroll_mode",
+                          static_cast<int>(dragScrolling ? MapScrollMode::GrabAndDrag : MapScrollMode::ScrollOpposite));
     const bfs::path settingsPath = RTTRCONFIG.expandPath("<RTTR_USERDATA>/s25edit.ini");
     // The user data directory does not exist if the game was never started
     boost::system::error_code ec;

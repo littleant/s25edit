@@ -186,13 +186,18 @@ void callback::submenuOptions(int Param)
     static CMenu* SubMenu = nullptr;
     static CFont* TextResolution = nullptr;
     static CButton* ButtonFullscreen = nullptr;
+    static CButton* ButtonDragScrolling = nullptr;
     static CSelectBox* SelectBoxRes = nullptr;
 
     enum
     {
         MAINMENU = 1,
         FULLSCREEN,
+        DRAG_SCROLLING,
         GRAPHICS_CHANGE
+    };
+    const auto dragScrollingText = [] {
+        return global::s2->dragScrolling ? "Scrolling: Drag map" : "Scrolling: Fixed cursor";
     };
 
     switch(Param)
@@ -214,9 +219,14 @@ void callback::submenuOptions(int Param)
             if(ButtonFullscreen)
                 SubMenu->delButton(ButtonFullscreen);
             ButtonFullscreen =
-              SubMenu->addButton(submenuOptions, FULLSCREEN, Position(global::s2->GameResolution.x / 2 - 100, 410),
+              SubMenu->addButton(submenuOptions, FULLSCREEN, Position(global::s2->GameResolution.x / 2 - 100, 380),
                                  Extent(200, 20), BUTTON_RED1, (global::s2->fullscreen ? "WINDOW" : "FULLSCREEN"));
-            SelectBoxRes = SubMenu->addSelectBox(ButtonFullscreen->getPos() - Position(0, 340), Extent(200, 330),
+            if(ButtonDragScrolling)
+                SubMenu->delButton(ButtonDragScrolling);
+            ButtonDragScrolling =
+              SubMenu->addButton(submenuOptions, DRAG_SCROLLING, ButtonFullscreen->getPos() + Position(0, 30),
+                                 Extent(200, 20), BUTTON_RED1, dragScrollingText());
+            SelectBoxRes = SubMenu->addSelectBox(ButtonFullscreen->getPos() - Position(0, 310), Extent(200, 300),
                                                  FontSize::Medium, FontColor::Yellow, BUTTON_GREY);
             // Query supported display resolutions from SDL and format like s25client
             {
@@ -273,6 +283,7 @@ void callback::submenuOptions(int Param)
             SubMenu->setWaste();
             TextResolution = nullptr;
             ButtonFullscreen = nullptr;
+            ButtonDragScrolling = nullptr;
             SelectBoxRes = nullptr;
             SubMenu = nullptr;
             mainmenu(INITIALIZING_CALL);
@@ -284,6 +295,13 @@ void callback::submenuOptions(int Param)
             submenuOptions(GRAPHICS_CHANGE);
             break;
 
+        case DRAG_SCROLLING:
+            assert(ButtonDragScrolling);
+            global::s2->dragScrolling = !global::s2->dragScrolling;
+            ButtonDragScrolling->setButtonText(dragScrollingText());
+            global::s2->SaveSettings();
+            break;
+
         case GRAPHICS_CHANGE:
             assert(SubMenu);
             global::s2->ApplyWindowChanges();
@@ -291,6 +309,7 @@ void callback::submenuOptions(int Param)
             SubMenu->setWaste();
             TextResolution = nullptr;
             ButtonFullscreen = nullptr;
+            ButtonDragScrolling = nullptr;
             SelectBoxRes = nullptr;
             SubMenu = nullptr;
             submenuOptions(INITIALIZING_CALL);

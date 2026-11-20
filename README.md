@@ -19,6 +19,19 @@ Compile as part of [RTTR](https://github.com/Return-To-The-Roots/s25client/).
 Put your Siedler 2 Gold (C) files in the S2 folder created (there is a file "put your S2-Installation in here").
 Don't create a subfolder. DATA and GFX have to be in the same directory as the above file.
 
+## Settings
+--------
+The editor stores its settings (also changeable under "Options" in the main menu) in `s25edit.ini` in the RTTR user
+data directory:
+
+- `[editor]`
+  - `width`, `height`: Resolution of the window
+  - `fullscreen`: `1` for fullscreen
+- `[interface]` (same section and name as in the settings of the game, `CONFIG.INI`)
+  - `map_scroll_mode`: How the map scrolls with the right mouse button: `1` keeps the cursor in place, which moves the
+    cursor back to its position after every movement. This doesn't work with graphics tablets or VMs with mouse
+    integration, which report the position of the device. `2` drags the map with the cursor instead.
+
 
 ## License
 --------

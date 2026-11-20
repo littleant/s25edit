@@ -104,6 +104,10 @@ private:
     bool HorizontalMovementLocked;
     bool VerticalMovementLocked;
     std::optional<Position> startScrollPos;
+    /// Drag the map with the cursor instead of keeping the cursor at startScrollPos
+    bool dragScrolling_ = false;
+
+    void startScrolling(Position pos);
 
 public:
     CMap(const boost::filesystem::path& filepath);
@@ -118,6 +122,13 @@ public:
     static void unloadMapPics();
 
     void moveMap(Position offset);
+    bool isScrolling() const { return startScrollPos.has_value(); }
+    /// The cursor stays at the start position while scrolling (unless dragging the map)
+    bool isCursorFrozen() const { return isScrolling() && !dragScrolling_; }
+    void stopScrolling();
+    /// Called for every mouse motion, even over windows
+    void onMouseMotion(const SDL_MouseMotionEvent& motion);
+    void stopModifying() { modify = false; }
     void setMouseData(const SDL_MouseMotionEvent& motion);
     void setMouseData(const SDL_MouseButtonEvent& button);
     void setKeyboardData(const SDL_KeyboardEvent& key);

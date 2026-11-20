@@ -47,6 +47,29 @@ void resetZoom(CMap* mapObj)
 }
 } // namespace
 
+Position CGame::warpMouseBack(Position pos)
+{
+    const Position offset = lastMousePos_ - pos;
+    SDL_WarpMouseInWindow(window_.get(), pos.x, pos.y);
+    // The motion event of this warp is then ignored as a duplicate
+    lastMousePos_ = pos;
+    return offset;
+}
+
+bool CGame::isMapCursorFrozen() const
+{
+    return MapObj && MapObj->isActive() && MapObj->isCursorFrozen();
+}
+
+void CGame::useFrozenCursorPos(SDL_MouseButtonEvent& button) const
+{
+    if(isMapCursorFrozen())
+    {
+        button.x = Cursor.pos.x;
+        button.y = Cursor.pos.y;
+    }
+}
+
 void CGame::EventHandling(SDL_Event* Event)
 {
     switch(Event->type)
@@ -145,17 +168,19 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEMOTION:
         {
-            // Avoid duplicate events especially when warping the mouse back during panning
+            // Avoid duplicate events especially when warping the mouse back while scrolling the map
             {
-                static Position lastMousePos = Position::invalid();
                 const Position newPos(Event->motion.x, Event->motion.y);
-                if(newPos == lastMousePos)
+                if(newPos == lastMousePos_)
                     break;
-                lastMousePos = newPos;
+                lastMousePos_ = newPos;
             }
 
-            // setup mouse cursor data
-            Cursor.pos = Position(Event->motion.x, Event->motion.y);
+            if(MapObj)
+                MapObj->onMouseMotion(Event->motion);
+            // setup mouse cursor data (it stays at the start position while scrolling the map)
+            if(!isMapCursorFrozen())
+                Cursor.pos = Position(Event->motion.x, Event->motion.y);
             /*
                         //NOTE: we will now deliver the data to menus, windows, map etc., sometimes we have to break the
                switch and stop
@@ -176,6 +201,13 @@ void CGame::EventHandling(SDL_Event* Event)
                         if (delivered)
                             break;
             */
+
+            // Keep scrolling the map when the cursor moves over a window.
+            if(MapObj && MapObj->isActive() && MapObj->isScrolling())
+            {
+                MapObj->setMouseData(Event->motion);
+                break;
+            }
 
             // NOTE: we will now deliver the data to menus, windows, map etc., sometimes we have to break the switch and
             // stop
@@ -238,6 +270,7 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEBUTTONDOWN:
         {
+            useFrozenCursorPos(Event->button);
             // setup mouse cursor data
             Cursor.clicked = true;
             Cursor.button.left = false;
@@ -313,6 +346,7 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_MOUSEBUTTONUP:
         {
+            useFrozenCursorPos(Event->button);
             // setup mouse cursor data
             Cursor.clicked = false;
 
@@ -437,6 +471,16 @@ void CGame::EventHandling(SDL_Event* Event)
 
         case SDL_WINDOWEVENT:
         {
+            // The buttons may be released in another window (e.g. after Alt+Tab), so stop scrolling/modifying the map
+            if(Event->window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+            {
+                Cursor.clicked = false;
+                if(MapObj)
+                {
+                    MapObj->stopScrolling();
+                    MapObj->stopModifying();
+                }
+            }
             if(Event->window.event == SDL_WINDOWEVENT_RESIZED)
             {
                 // In fullscreen the compositor (e.g. Wayland) may report a size
