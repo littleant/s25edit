@@ -25,8 +25,11 @@ The editor stores its settings (also changeable under "Options" in the main menu
 data directory, with the same sections and names as the game in `CONFIG.INI`:
 
 - `[video]`
-  - `windowed_width`, `windowed_height`: Resolution of the window
-  - `displayMode`: `0` for window mode, `1` for fullscreen
+  - `windowed_width`, `windowed_height`: Size of the window in window mode, in pixels at 100% display scaling (also
+    kept in fullscreen)
+  - `displayMode`: `0` for window mode, `1` for fullscreen (using the native resolution of the display)
+  - `gui_scale`: GUI scale in percent, `0` for automatic (the display scaling). It is limited so that at least 800x600
+    remain visible.
 - `[interface]`
   - `map_scroll_mode`: How the map scrolls with the right mouse button: `1` keeps the cursor in place, which moves the
     cursor back to its position after every movement. This doesn't work with graphics tablets or VMs with mouse

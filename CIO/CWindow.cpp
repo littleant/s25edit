@@ -254,15 +254,13 @@ void CWindow::draw(Position /*parentOrigin*/)
     // 2. Content (if not minimized) — clipped to the area inside frames
     if(!minimized)
     {
-        const auto viewH = global::s2->getRes().y;
         const auto& b = getBorderSizes();
         const auto contentOrigin = pos_ + Position(b.left, b.top);
         const auto contentSize = getSize() - getBorderSize();
         if(static_cast<int>(contentSize.x) > 0 && static_cast<int>(contentSize.y) > 0)
         {
             glEnable(GL_SCISSOR_TEST);
-            glScissor(contentOrigin.x, viewH - (contentOrigin.y + static_cast<int>(contentSize.y)),
-                      static_cast<int>(contentSize.x), static_cast<int>(contentSize.y));
+            global::s2->setScissor(Rect(contentOrigin, contentSize));
             drawChildren(pos_);
             glDisable(GL_SCISSOR_TEST);
         }

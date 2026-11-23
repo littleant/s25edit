@@ -7,6 +7,7 @@
 #include "CDebug.h"
 #include "CGame.h"
 #include "CIO/CButton.h"
+#include "CIO/CDropDown.h"
 #include "CIO/CFile.h"
 #include "CIO/CFont.h"
 #include "CIO/CMenu.h"
@@ -19,14 +20,16 @@
 #include "CSurface.h"
 #include "CollisionDetection.h"
 #include "globals.h"
+#include "helpers/containerUtils.h"
 #include "helpers/format.hpp"
+#include "helpers/mathFuncs.h"
 #include "s25util/strAlgos.h"
 #include <glad/glad.h>
 #include <boost/filesystem.hpp>
 #include <algorithm>
 #include <cctype>
 #include <numeric>
-#include <set>
+#include <tuple>
 
 namespace bfs = boost::filesystem;
 
@@ -181,138 +184,236 @@ void callback::mainmenu(int Param)
     }
 }
 
+namespace {
+std::pair<int, int> getAspectRatio(int w, int h)
+{
+    // Some resolutions have conventional aspect ratios
+    if(w == 1360 && h == 1024)
+        return {4, 3};
+    if((w == 1360 && h == 768) || (w == 1366 && h == 768))
+        return {16, 9};
+    int divisor = std::gcd(w, h);
+    std::pair<int, int> ratio = {w / divisor, h / divisor};
+    if(ratio == std::pair<int, int>(8, 5))
+        return {16, 10};
+    if(ratio == std::pair<int, int>(5, 3))
+        return {15, 9};
+    if(ratio == std::pair<int, int>(64, 27) || ratio == std::pair<int, int>(43, 18))
+        return {21, 9};
+    return ratio;
+}
+
+std::string getResolutionLabel(const Extent& res)
+{
+    const auto ratio = getAspectRatio(static_cast<int>(res.x), static_cast<int>(res.y));
+    std::string label = helpers::format("%dx%d", res.x, res.y);
+    // Only show common aspect ratios, odd ones (e.g. from scaled window sizes) are not helpful
+    if(ratio.first > 32 || ratio.second > 32)
+        return label;
+    // Pad to 9 chars (4+1+4 = "1234x5678") for alignment
+    int padding = 9 - static_cast<int>(label.size());
+    if(padding > 0)
+        label.append(padding, ' ');
+    return label + helpers::format(" (%d:%d)", ratio.first, ratio.second);
+}
+
+std::string getGuiScaleLabel(unsigned percent, const Extent& windowSize)
+{
+    if(percent == 0)
+        return helpers::format("Auto (%u%%)", global::s2->getGuiScaleRange(windowSize).recommendedPercent);
+    return helpers::format("%u%%", percent);
+}
+
+/// Selectable window size in window coordinates and its size in pixels shown to the user
+struct Resolution
+{
+    Extent window, pixels;
+};
+
+/// Query supported display resolutions from SDL like s25client, sorted and including the given window size
+std::vector<Resolution> getResolutions(const Extent& current)
+{
+    const float dpiScale = global::s2->getDpiScale();
+    const auto scaled = [](const Extent& size, float factor) {
+        return Extent(helpers::iround<unsigned>(size.x * factor), helpers::iround<unsigned>(size.y * factor));
+    };
+    std::vector<Resolution> resolutions;
+    int numDisplays = SDL_GetNumVideoDisplays();
+    for(int d = 0; d < numDisplays; ++d)
+    {
+        int numModes = SDL_GetNumDisplayModes(d);
+        for(int m = 0; m < numModes; ++m)
+        {
+            SDL_DisplayMode mode;
+            // Use the modes as pixels: The native and emulated modes on Wayland are pixels (the desktop mode is in
+            // points, but added below), on macOS all are points but would mostly exceed the display as window size.
+            // Skip resolutions smaller than 800x600 (like s25client's MinWindowSize)
+            if(SDL_GetDisplayMode(d, m, &mode) == 0 && (mode.w >= 800 || mode.h >= 600))
+            {
+                const Extent pixels(mode.w, mode.h);
+                resolutions.push_back({scaled(pixels, 1.f / dpiScale), pixels});
+            }
+        }
+    }
+    // The current window size and the size of the window's display in window coordinates
+    for(const Extent& window : {current, global::s2->getFullscreenSize()})
+        resolutions.push_back({window, scaled(window, dpiScale)});
+    // Sort by window size and keep the first entry of each size, so modes keep their exact pixel size as label
+    std::stable_sort(resolutions.begin(), resolutions.end(), [](const Resolution& lhs, const Resolution& rhs) {
+        return std::tie(lhs.window.x, lhs.window.y) < std::tie(rhs.window.x, rhs.window.y);
+    });
+    resolutions.erase(
+      std::unique(resolutions.begin(), resolutions.end(),
+                  [](const Resolution& lhs, const Resolution& rhs) { return lhs.window == rhs.window; }),
+      resolutions.end());
+    return resolutions;
+}
+
+/// Selectable GUI scales in percent for the given window size: Auto (0) and steps of 10% like in s25client
+std::vector<unsigned> getGuiScales(const Extent& windowSize)
+{
+    const auto range = global::s2->getGuiScaleRange(windowSize);
+    std::vector<unsigned> percents{0};
+    for(unsigned percent = range.minPercent; percent <= range.maxPercent; percent += 10)
+        percents.push_back(percent);
+    return percents;
+}
+} // namespace
+
 void callback::submenuOptions(int Param)
 {
     static CMenu* SubMenu = nullptr;
-    static CFont* TextResolution = nullptr;
-    static CButton* ButtonFullscreen = nullptr;
-    static CButton* ButtonDragScrolling = nullptr;
-    static CSelectBox* SelectBoxRes = nullptr;
+    // Changes are only applied when saved
+    static Extent pendingResolution;
+    static bool pendingFullscreen = false;
+    static unsigned pendingGuiScale = 0;
+    static bool pendingDragScrolling = false;
+    // Applied state the menu was built for: window and fullscreen size, auto scale and view size
+    const auto getBuildState = []() {
+        return std::make_tuple(global::s2->WindowResolution, global::s2->getFullscreenSize(),
+                               global::s2->getGuiScaleRange(global::s2->WindowResolution).recommendedPercent,
+                               global::s2->GameResolution);
+    };
+    // The GUI scales depend on the size the window will have
+    const auto getPendingSize = []() {
+        return pendingFullscreen ? global::s2->getFullscreenSize() : pendingResolution;
+    };
+    static decltype(getBuildState()) builtState;
 
     enum
     {
         MAINMENU = 1,
-        FULLSCREEN,
-        DRAG_SCROLLING,
-        GRAPHICS_CHANGE
-    };
-    const auto dragScrollingText = [] {
-        return global::s2->dragScrolling ? "Scrolling: Drag map" : "Scrolling: Fixed cursor";
+        SAVE,
+        REBUILD
     };
 
     switch(Param)
     {
         case INITIALIZING_CALL:
-            SubMenu = global::s2->RegisterMenu(std::make_unique<CMenu>(SPLASHSCREEN_SUBMENU3));
-            // add button for "back to main menu"
-            SubMenu->addButton(submenuOptions, MAINMENU, Position(global::s2->GameResolution.x / 2 - 100, 440),
-                               Extent(200, 20), BUTTON_RED1, "back");
-            // add menu title
-            SubMenu->addText("Options", Position(global::s2->GameResolution.x / 2 - 20, 10), FontSize::Large);
-            // add screen resolution
-            if(TextResolution)
-                SubMenu->delText(TextResolution);
-            TextResolution = SubMenu->addText(
-              helpers::format("Game Resolution: %d*%d / %s", global::s2->GameResolution.x, global::s2->GameResolution.y,
-                              (global::s2->fullscreen ? "Fullscreen" : "Window")),
-              Position(global::s2->GameResolution.x / 2 - 110, 50), FontSize::Medium);
-            if(ButtonFullscreen)
-                SubMenu->delButton(ButtonFullscreen);
-            ButtonFullscreen =
-              SubMenu->addButton(submenuOptions, FULLSCREEN, Position(global::s2->GameResolution.x / 2 - 100, 380),
-                                 Extent(200, 20), BUTTON_RED1, (global::s2->fullscreen ? "WINDOW" : "FULLSCREEN"));
-            if(ButtonDragScrolling)
-                SubMenu->delButton(ButtonDragScrolling);
-            ButtonDragScrolling =
-              SubMenu->addButton(submenuOptions, DRAG_SCROLLING, ButtonFullscreen->getPos() + Position(0, 30),
-                                 Extent(200, 20), BUTTON_RED1, dragScrollingText());
-            SelectBoxRes = SubMenu->addSelectBox(ButtonFullscreen->getPos() - Position(0, 310), Extent(200, 300),
-                                                 FontSize::Medium, FontColor::Yellow, BUTTON_GREY);
-            // Query supported display resolutions from SDL and format like s25client
+        case REBUILD:
+        {
+            if(Param == INITIALIZING_CALL)
             {
-                auto getAspectRatio = [](int w, int h) -> std::pair<int, int> {
-                    // Some resolutions have conventional aspect ratios
-                    if(w == 1360 && h == 1024)
-                        return {4, 3};
-                    if((w == 1360 && h == 768) || (w == 1366 && h == 768))
-                        return {16, 9};
-                    int divisor = std::gcd(w, h);
-                    std::pair<int, int> ratio = {w / divisor, h / divisor};
-                    if(ratio == std::pair<int, int>(8, 5))
-                        return {16, 10};
-                    if(ratio == std::pair<int, int>(5, 3))
-                        return {15, 9};
-                    return ratio;
-                };
+                // Rebuilds keep the registration and the unsaved choices
+                global::s2->RegisterCallback(submenuOptions);
+                pendingFullscreen = global::s2->fullscreen;
+                pendingGuiScale = global::s2->guiScalePercent;
+                pendingDragScrolling = global::s2->dragScrolling;
+            }
+            pendingResolution = global::s2->WindowResolution;
+            builtState = getBuildState();
 
-                std::set<std::pair<int, int>> resolutions;
-                int numDisplays = SDL_GetNumVideoDisplays();
-                for(int d = 0; d < numDisplays; ++d)
-                {
-                    int numModes = SDL_GetNumDisplayModes(d);
-                    for(int m = 0; m < numModes; ++m)
-                    {
-                        SDL_DisplayMode mode;
-                        if(SDL_GetDisplayMode(d, m, &mode) == 0)
-                            resolutions.insert({mode.w, mode.h});
-                    }
-                }
-                for(const auto& res : resolutions)
-                {
-                    // Skip resolutions smaller than 800x600 (like s25client's MinWindowSize)
-                    if(res.first < 800 && res.second < 600)
-                        continue;
-                    auto ratio = getAspectRatio(res.first, res.second);
-                    std::string label = helpers::format("%dx%d", res.first, res.second);
-                    // Pad to 9 chars (4+1+4 = "1234x5678") for alignment
-                    int padding = 9 - static_cast<int>(label.size());
-                    if(padding > 0)
-                        label.append(padding, ' ');
-                    label += helpers::format(" (%d:%d)", ratio.first, ratio.second);
-                    SelectBoxRes->addOption(label, [res](int) {
-                        global::s2->GameResolution.x = res.first;
-                        global::s2->GameResolution.y = res.second;
-                        submenuOptions(GRAPHICS_CHANGE);
-                    });
-                }
+            SubMenu = global::s2->RegisterMenu(std::make_unique<CMenu>(SPLASHSCREEN_SUBMENU3));
+            const int centerX = static_cast<int>(global::s2->GameResolution.x / 2);
+            SubMenu->addText("Options", Position(centerX - 20, 10), FontSize::Large);
+
+            const Position modePos(centerX - 340, 110), resolutionPos(centerX - 180, 110),
+              guiScalePos(centerX + 40, 110), scrollingPos(centerX + 200, 110);
+            SubMenu->addText("Mode", modePos - Position(0, 20), FontSize::Medium);
+            SubMenu->addText("Window size", resolutionPos - Position(0, 20), FontSize::Medium);
+            SubMenu->addText("GUI scale", guiScalePos - Position(0, 20), FontSize::Medium);
+            SubMenu->addText("Scrolling", scrollingPos - Position(0, 20), FontSize::Medium);
+
+            const auto onGuiScaleSelected = [getPendingSize](unsigned index) {
+                pendingGuiScale = getGuiScales(getPendingSize())[index];
+            };
+            auto* guiScaleDropDown = SubMenu->addDropDown(guiScalePos, Extent(140, 20), onGuiScaleSelected);
+            // The items (auto scale and maximum) depend on the mode and window size
+            const auto updateGuiScales = [guiScaleDropDown, getPendingSize]() {
+                const Extent size = getPendingSize();
+                const auto guiScales = getGuiScales(size);
+                // Like s25client: Lower the GUI scale if it exceeds the maximum
+                pendingGuiScale = std::min(pendingGuiScale, guiScales.back());
+                std::vector<std::string> labels;
+                for(unsigned percent : guiScales)
+                    labels.push_back(getGuiScaleLabel(percent, size));
+                // Like s25client: No selection if the value is not in the list (-1 -> out of range)
+                guiScaleDropDown->setItems(std::move(labels),
+                                           static_cast<unsigned>(helpers::indexOf(guiScales, pendingGuiScale)));
+            };
+            updateGuiScales();
+
+            const auto onModeSelected = [updateGuiScales](unsigned index) {
+                pendingFullscreen = index == 1;
+                updateGuiScales();
+            };
+            SubMenu->addDropDown(modePos, Extent(140, 20), onModeSelected)
+              ->setItems({"Window", "Fullscreen"}, pendingFullscreen ? 1u : 0u);
+
+            const auto resolutions = getResolutions(pendingResolution);
+            std::vector<std::string> resolutionLabels;
+            for(const auto& res : resolutions)
+                resolutionLabels.push_back(getResolutionLabel(res.pixels));
+            const auto onResolutionSelected = [resolutions, updateGuiScales](unsigned index) {
+                pendingResolution = resolutions[index].window;
+                updateGuiScales();
+            };
+            SubMenu->addDropDown(resolutionPos, Extent(200, 20), onResolutionSelected)
+              ->setItems(std::move(resolutionLabels),
+                         static_cast<unsigned>(helpers::indexOfIf(
+                           resolutions, [](const Resolution& res) { return res.window == pendingResolution; })));
+
+            // See CGame::dragScrolling
+            SubMenu->addDropDown(scrollingPos, Extent(140, 20),
+                                 [](unsigned index) noexcept { pendingDragScrolling = index == 1; })
+              ->setItems({"Fixed cursor", "Drag map"}, pendingDragScrolling ? 1u : 0u);
+
+            SubMenu->addButton(submenuOptions, SAVE, Position(centerX - 100, 430), Extent(200, 20), BUTTON_GREEN2,
+                               "Save");
+            SubMenu->addButton(submenuOptions, MAINMENU, Position(centerX - 100, 460), Extent(200, 20), BUTTON_RED1,
+                               "Back");
+            break;
+        }
+
+        case CALL_FROM_GAMELOOP:
+            assert(SubMenu);
+            // The window was resized or moved to a display with another scaling
+            if(builtState != getBuildState())
+            {
+                SubMenu->setWaste();
+                submenuOptions(REBUILD);
             }
             break;
 
         case MAINMENU:
             assert(SubMenu);
+            global::s2->UnregisterCallback(submenuOptions);
             SubMenu->setWaste();
-            TextResolution = nullptr;
-            ButtonFullscreen = nullptr;
-            ButtonDragScrolling = nullptr;
-            SelectBoxRes = nullptr;
             SubMenu = nullptr;
             mainmenu(INITIALIZING_CALL);
             break;
 
-        case FULLSCREEN:
-            global::s2->fullscreen = !global::s2->fullscreen;
-
-            submenuOptions(GRAPHICS_CHANGE);
-            break;
-
-        case DRAG_SCROLLING:
-            assert(ButtonDragScrolling);
-            global::s2->dragScrolling = !global::s2->dragScrolling;
-            ButtonDragScrolling->setButtonText(dragScrollingText());
-            global::s2->SaveSettings();
-            break;
-
-        case GRAPHICS_CHANGE:
+        case SAVE:
             assert(SubMenu);
+            global::s2->WindowResolution = pendingResolution;
+            global::s2->fullscreen = pendingFullscreen;
+            global::s2->guiScalePercent = pendingGuiScale;
+            global::s2->dragScrolling = pendingDragScrolling;
             global::s2->ApplyWindowChanges();
             global::s2->SaveSettings();
+            // Rebuild the menu as the layout depends on the new view size
             SubMenu->setWaste();
-            TextResolution = nullptr;
-            ButtonFullscreen = nullptr;
-            ButtonDragScrolling = nullptr;
-            SelectBoxRes = nullptr;
-            SubMenu = nullptr;
-            submenuOptions(INITIALIZING_CALL);
+            submenuOptions(REBUILD);
             break;
 
         default: break;
@@ -2592,6 +2693,7 @@ void callback::MinimapMenu(int Param)
                 Position mouse;
                 if(SDL_GetMouseState(&mouse.x, &mouse.y) & SDL_BUTTON(1))
                 {
+                    mouse = global::s2->screenToView(mouse);
                     if(isPointInRect(
                          mouse, Rect(WNDMinimap->getPos() + Position(6, 20), WNDMinimap->getSize() - Extent(12, 30))))
                     {
@@ -2811,7 +2913,7 @@ void callback::submenu1(int Param)
     {
         case INITIALIZING_CALL:
             SubMenu = global::s2->RegisterMenu(std::make_unique<CMenu>(SPLASHSCREEN_SUBMENU1));
-            SubMenu->addButton(submenu1, MAINMENU, Position(400, 440), Extent(200, 20), BUTTON_RED1, "back");
+            SubMenu->addButton(submenu1, MAINMENU, Position(400, 440), Extent(200, 20), BUTTON_RED1, "Back");
             greatMoon = SubMenu->addButton(submenu1, GREATMOON, Position(100, 100), Extent(200, 200), BUTTON_STONE,
                                            nullptr, MOON);
             greatMoon->setMotionParams(GREATMOONENTRY, GREATMOONLEAVE);

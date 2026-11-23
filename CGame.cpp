@@ -10,6 +10,7 @@
 #include "RttrConfig.h"
 #include "files.h"
 #include "globals.h"
+#include "helpers/mathFuncs.h"
 #include "s25util/file_handle.h"
 #include <libsiedler2/ArchivItem_Ini.h>
 #include <libsiedler2/ErrorCodes.h>
@@ -35,8 +36,8 @@ namespace bfs = boost::filesystem;
 boost::program_options::variables_map parse_cmdline_args(int argc, char* argv[]);
 
 CGame::CGame(Extent GameResolution_, bool fullscreen_)
-    : GameResolution(GameResolution_), fullscreen(fullscreen_), Running(true), showLoadScreen(true),
-      lastFps("", Position{0, 0}, FontSize::Medium)
+    : GameResolution(GameResolution_), WindowResolution(GameResolution_), fullscreen(fullscreen_), Running(true),
+      showLoadScreen(true), lastFps("", Position{0, 0}, FontSize::Medium)
 {
     global::bmpArray.resize(MAXBOBBMP);
     global::shadowArray.resize(MAXBOBSHADOW);
@@ -199,18 +200,19 @@ void CGame::LoadSettings()
     // Same sections and names as in the settings of s25client
     if(const auto* iniVideo = findSection("video"))
     {
-        GameResolution.x = iniVideo->getValue("windowed_width", static_cast<int>(GameResolution.x));
-        GameResolution.y = iniVideo->getValue("windowed_height", static_cast<int>(GameResolution.y));
+        WindowResolution.x = iniVideo->getValue("windowed_width", static_cast<int>(WindowResolution.x));
+        WindowResolution.y = iniVideo->getValue("windowed_height", static_cast<int>(WindowResolution.y));
         const int displayMode = iniVideo->getValue("displayMode", -1);
         if(displayMode == static_cast<int>(DisplayMode::Windowed))
             fullscreen = false;
         else if(displayMode == static_cast<int>(DisplayMode::Fullscreen))
             fullscreen = true;
+        guiScalePercent = iniVideo->getValue("gui_scale", static_cast<int>(guiScalePercent));
     } else if(const auto* iniEditor = findSection("editor"))
     {
         // Settings of older versions
-        GameResolution.x = iniEditor->getValue("width", static_cast<int>(GameResolution.x));
-        GameResolution.y = iniEditor->getValue("height", static_cast<int>(GameResolution.y));
+        WindowResolution.x = iniEditor->getValue("width", static_cast<int>(WindowResolution.x));
+        WindowResolution.y = iniEditor->getValue("height", static_cast<int>(WindowResolution.y));
         fullscreen = iniEditor->getValue("fullscreen", fullscreen);
     }
     if(const auto* iniInterface = findSection("interface"))
@@ -228,9 +230,11 @@ void CGame::SaveSettings() const
     libsiedler2::Archiv settings;
     settings.push(std::make_unique<libsiedler2::ArchivItem_Ini>("video"));
     auto& iniVideo = dynamic_cast<libsiedler2::ArchivItem_Ini&>(*settings.find("video"));
-    iniVideo.setValue("windowed_width", GameResolution.x);
-    iniVideo.setValue("windowed_height", GameResolution.y);
+    // Store the window mode size (also in fullscreen) in pixels at 100% scaling like other DPI aware applications
+    iniVideo.setValue("windowed_width", helpers::iround<int>(WindowResolution.x / displayScale_));
+    iniVideo.setValue("windowed_height", helpers::iround<int>(WindowResolution.y / displayScale_));
     iniVideo.setValue("displayMode", static_cast<int>(fullscreen ? DisplayMode::Fullscreen : DisplayMode::Windowed));
+    iniVideo.setValue("gui_scale", guiScalePercent);
     settings.push(std::make_unique<libsiedler2::ArchivItem_Ini>("interface"));
     auto& iniInterface = dynamic_cast<libsiedler2::ArchivItem_Ini&>(*settings.find("interface"));
     iniInterface.setValue("map_scroll_mode",
@@ -391,6 +395,17 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "Initializing SDL...";
+#ifdef SDL_HINT_WINDOWS_DPI_AWARENESS
+    // Use pixels for the window size instead of letting Windows upscale the window according to the display scaling.
+    // Scaling is done by the GUI scale instead.
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
+#if defined(SDL_HINT_VIDEODRIVER) \
+  && (defined(__LINUX__) || defined(__FREEBSD__) || defined(__OPENBSD__) || defined(__NETBSD__))
+    // Prefer Wayland over X11 like SDL3 does, as only there the display scaling can be detected.
+    // Default priority, so the environment variable SDL_VIDEODRIVER still takes precedence.
+    SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "wayland,x11", SDL_HINT_DEFAULT);
+#endif
     if(SDL_Init(SDL_INIT_EVERYTHING) < 0)
     {
         std::cout << "failure";
