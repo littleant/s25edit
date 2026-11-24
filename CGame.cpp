@@ -173,6 +173,12 @@ void CGame::enterEditor(const boost::filesystem::path& filepath)
 }
 
 namespace {
+/// Values of displayMode in the section "video", like DisplayMode::Type in s25client
+enum class DisplayMode
+{
+    Windowed = 0,
+    Fullscreen = 1
+};
 /// Values of map_scroll_mode in the section "interface", like MapScrollMode in s25client
 enum class MapScrollMode
 {
@@ -187,14 +193,27 @@ void CGame::LoadSettings()
     libsiedler2::Archiv settings;
     if(libsiedler2::load(settingsPath, settings) != 0)
         return;
-    const auto* ini = dynamic_cast<const libsiedler2::ArchivItem_Ini*>(settings.find("editor"));
-    if(!ini)
-        return;
-    GameResolution.x = ini->getValue("width", static_cast<int>(GameResolution.x));
-    GameResolution.y = ini->getValue("height", static_cast<int>(GameResolution.y));
-    fullscreen = ini->getValue("fullscreen", fullscreen);
-    // Same section and name as in the settings of s25client
-    if(const auto* iniInterface = dynamic_cast<const libsiedler2::ArchivItem_Ini*>(settings.find("interface")))
+    const auto findSection = [&settings](const char* name) {
+        return dynamic_cast<const libsiedler2::ArchivItem_Ini*>(settings.find(name));
+    };
+    // Same sections and names as in the settings of s25client
+    if(const auto* iniVideo = findSection("video"))
+    {
+        GameResolution.x = iniVideo->getValue("windowed_width", static_cast<int>(GameResolution.x));
+        GameResolution.y = iniVideo->getValue("windowed_height", static_cast<int>(GameResolution.y));
+        const int displayMode = iniVideo->getValue("displayMode", -1);
+        if(displayMode == static_cast<int>(DisplayMode::Windowed))
+            fullscreen = false;
+        else if(displayMode == static_cast<int>(DisplayMode::Fullscreen))
+            fullscreen = true;
+    } else if(const auto* iniEditor = findSection("editor"))
+    {
+        // Settings of older versions
+        GameResolution.x = iniEditor->getValue("width", static_cast<int>(GameResolution.x));
+        GameResolution.y = iniEditor->getValue("height", static_cast<int>(GameResolution.y));
+        fullscreen = iniEditor->getValue("fullscreen", fullscreen);
+    }
+    if(const auto* iniInterface = findSection("interface"))
     {
         const int mapScrollMode = iniInterface->getValue("map_scroll_mode", -1);
         if(mapScrollMode == static_cast<int>(MapScrollMode::ScrollOpposite))
@@ -207,11 +226,11 @@ void CGame::LoadSettings()
 void CGame::SaveSettings() const
 {
     libsiedler2::Archiv settings;
-    settings.push(std::make_unique<libsiedler2::ArchivItem_Ini>("editor"));
-    auto& ini = dynamic_cast<libsiedler2::ArchivItem_Ini&>(*settings.find("editor"));
-    ini.setValue("width", GameResolution.x);
-    ini.setValue("height", GameResolution.y);
-    ini.setValue("fullscreen", static_cast<int>(fullscreen));
+    settings.push(std::make_unique<libsiedler2::ArchivItem_Ini>("video"));
+    auto& iniVideo = dynamic_cast<libsiedler2::ArchivItem_Ini&>(*settings.find("video"));
+    iniVideo.setValue("windowed_width", GameResolution.x);
+    iniVideo.setValue("windowed_height", GameResolution.y);
+    iniVideo.setValue("displayMode", static_cast<int>(fullscreen ? DisplayMode::Fullscreen : DisplayMode::Windowed));
     settings.push(std::make_unique<libsiedler2::ArchivItem_Ini>("interface"));
     auto& iniInterface = dynamic_cast<libsiedler2::ArchivItem_Ini&>(*settings.find("interface"));
     iniInterface.setValue("map_scroll_mode",

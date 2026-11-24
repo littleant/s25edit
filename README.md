@@ -22,15 +22,17 @@ Don't create a subfolder. DATA and GFX have to be in the same directory as the a
 ## Settings
 --------
 The editor stores its settings (also changeable under "Options" in the main menu) in `s25edit.ini` in the RTTR user
-data directory:
+data directory, with the same sections and names as the game in `CONFIG.INI`:
 
-- `[editor]`
-  - `width`, `height`: Resolution of the window
-  - `fullscreen`: `1` for fullscreen
-- `[interface]` (same section and name as in the settings of the game, `CONFIG.INI`)
+- `[video]`
+  - `windowed_width`, `windowed_height`: Resolution of the window
+  - `displayMode`: `0` for window mode, `1` for fullscreen
+- `[interface]`
   - `map_scroll_mode`: How the map scrolls with the right mouse button: `1` keeps the cursor in place, which moves the
     cursor back to its position after every movement. This doesn't work with graphics tablets or VMs with mouse
     integration, which report the position of the device. `2` drags the map with the cursor instead.
+
+Older versions stored `width`, `height` and `fullscreen` in the section `[editor]`, which is still read.
 
 
 ## License
